@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>10分钟身份核验码（家长↔留学生）</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;background:#f6f7fb;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center}
+    .card{background:#fff;padding:22px 22px 18px;border-radius:14px;box-shadow:0 10px 24px rgba(0,0,0,.08);width:min(560px,92vw)}
+    h1{margin:0 0 10px;font-size:20px}
+    .row{display:flex;gap:12px;align-items:center;margin:8px 0}
+    .row input[type="password"], .row input[type="text"]{flex:1;padding:10px 12px;border:1px solid #dcdfe6;border-radius:8px}
+    .row label{font-size:14px;color:#555}
+    .codes{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+    .codebox{border:1px dashed #c7ccd6;border-radius:10px;padding:12px;text-align:center;background:#fafbff}
+    .code{font-family:Consolas,monospace;font-size:28px;letter-spacing:3px;margin:6px 0 2px}
+    .muted{color:#777;font-size:12px}
+    .bad{color:#c62828}
+    button{padding:10px 14px;border:none;border-radius:8px;background:#2e7be6;color:#fff;font-weight:600;cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .footer{margin-top:12px;font-size:12px;color:#666}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>10分钟身份核验码（家长 ↔ 留学生）</h1>
+
+    <div class="row">
+      <label for="secret">共享密钥：</label>
+      <input id="secret" type="password" placeholder="在此输入双方约定的密钥" autocomplete="off">
+      <label><input id="remember" type="checkbox"> 本机记住</label>
+      <button id="genBtn">生成</button>
+    </div>
+
+    <div class="row">
+      <label>当前 UTC 时间段：</label>
+      <input id="utcd" type="text" readonly>
+      <span class="muted">按 UTC，每10分钟变一次</span>
+    </div>
+
+    <div class="codes">
+      <div class="codebox">
+        <div class="muted">学生 → 家长（S→P）</div>
+        <div id="s2p" class="code">------</div>
+      </div>
+      <div class="codebox">
+        <div class="muted">家长 → 学生（P→S）</div>
+        <div id="p2s" class="code">------</div>
+      </div>
+    </div>
+
+    <div class="footer">
+      标准流程：来电方先报 S→P，核对通过后，接听方报 P→S 进行反向挑战；两者均一致才确认身份。
+    </div>
+  </div>
+
+  <script>
+    // —— 安全散列（WebCrypto SHA-256）
+    async function sha256Hex(str){
+      const buf = new TextEncoder().encode(str);
+      const digest = await crypto.subtle.digest('SHA-256', buf);
+      const arr = Array.from(new Uint8Array(digest));
+      return arr.map(b=>b.toString(16).padStart(2,'0')).join('');
+    }
+
+    // —— 从 hash 生成 6位混合码
+    function sixMixedFromHex(hex){
+      const bytes = [];
+      for(let i=0;i<12;i++){ bytes.push(parseInt(hex.slice(i*2,i*2+2),16)); }
+      const nums = Array.from({length:3},(_,i)=> (bytes[i]%10).toString()).join('');
+      const letters = Array.from({length:3},(_,i)=> String.fromCharCode(65 + (bytes[i+3]%26))).join('');
+      const combined = (nums+letters).split('');
+      for(let i=0;i<combined.length;i++){
+        const j = bytes[6+i] % combined.length;
+        [combined[i], combined[j]] = [combined[j], combined[i]];
+      }
+      return combined.join('');
+    }
+
+    // —— 生成某一“用途”的代码
+    async function codeFor(secret, slotStr, purpose){
+      const material = `${secret}|${slotStr}|${purpose}`;
+      const hex = await sha256Hex(material);
+      return sixMixedFromHex(hex);
+    }
+
+    // —— 获取当前 UTC 的 10分钟槽标识
+    function currentSlot(){
+      const now = new Date();
+      const y = now.getUTCFullYear();
+      const m = String(now.getUTCMonth()+1).padStart(2,'0');
+      const d = String(now.getUTCDate()).padStart(2,'0');
+      const h = String(now.getUTCHours()).padStart(2,'0');
+      const block = Math.floor(now.getUTCMinutes()/10);
+      return `${y}-${m}-${d} ${h}:00 block${block}`;
+    }
+
+    // —— 初始化
+    const utcd = document.getElementById('utcd');
+    const s2pEl = document.getElementById('s2p');
+    const p2sEl = document.getElementById('p2s');
+    const genBtn = document.getElementById('genBtn');
+    const secretEl = document.getElementById('secret');
+    const rememberEl = document.getElementById('remember');
+
+    // 载入本机保存的密钥
+    try{
+      const saved = localStorage.getItem('dac_secret');
+      if(saved){ secretEl.value = saved; rememberEl.checked = true; }
+    }catch(e){}
+
+    async function generate(manual=false){
+      const sec = secretEl.value.trim();
+      if(!sec){
+        if(manual){ alert('请先输入双方共享密钥'); }
+        return; // 自动刷新时密钥为空就直接跳过
+      }
+
+      try{
+        if(rememberEl.checked){ localStorage.setItem('dac_secret', sec); }
+        else { localStorage.removeItem('dac_secret'); }
+      }catch(e){}
+
+      const slotStr = currentSlot();
+      utcd.value = slotStr;
+
+      const [a,b] = await Promise.all([
+        codeFor(sec, slotStr, 'S2P'),
+        codeFor(sec, slotStr, 'P2S')
+      ]);
+      s2pEl.textContent = a;
+      p2sEl.textContent = b;
+    }
+
+    genBtn.addEventListener('click', ()=>generate(true));
+
+    // 定时刷新（每秒检查一次）
+    setInterval(()=>generate(false), 1000);
+    if(secretEl.value){ generate(false); }
+  </script>
+</body>
+</html>
